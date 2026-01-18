@@ -65,7 +65,7 @@ def run_non_stationary_experiment(runs=500, steps=5000):
             if s == 500:
                 env = NonStationaryBandit()  # 中途改变环境，重新初始化
             for i, agent in enumerate(agents):
-                action = agent.select_action()
+                action = agent.select_action(method='epsilon_greedy')
                 reward = env.get_reward(action)
                 agent.update_estimates(action, reward)
                 all_rewards[i, s] += reward
