@@ -37,6 +37,12 @@ class Agent:
             # UCB 策略
             ucb_values = self.q_estimates + np.sqrt(2 * np.log(np.sum(self.action_counts) + 1) / (self.action_counts + 1e-5))
             return np.argmax(ucb_values)
+        elif method == 'gradient':
+            # 梯度上升策略（假设偏好值初始化为0）
+            preferences = self.q_estimates
+            exp_preferences = np.exp(preferences - np.max(preferences))
+            action_probs = exp_preferences / np.sum(exp_preferences)
+            return np.random.choice(self.k, p=action_probs)
 
     def update_estimates(self, action, reward):
         self.action_counts[action] += 1
@@ -49,23 +55,19 @@ class Agent:
             
         self.q_estimates[action] += step_size * (reward - self.q_estimates[action])
 
-def run_non_stationary_experiment(runs=500, steps=5000):
+def run_non_stationary_experiment(runs=500, steps=1000):
     # 对比：样本平均 vs 固定步长 (alpha=0.1)
     # 两者都使用 epsilon=0.1 保证足够的探索
     labels = ['Sample-Average (1/n)', 'Constant Step-size (α=0.1)']
     all_rewards = np.zeros((2, steps))
-
     for r in range(runs):
         # 每次 run 初始化两个 agent 处理同一个环境
         env = NonStationaryBandit()
         agents = [Agent(alpha=None), Agent(alpha=0.1)]
-        
         for s in range(steps):
             #env.step() # 环境发生变化！
-            if s == 500:
-                env = NonStationaryBandit()  # 中途改变环境，重新初始化
             for i, agent in enumerate(agents):
-                action = agent.select_action(method='epsilon_greedy')
+                action = agent.select_action(method='gradient')
                 reward = env.get_reward(action)
                 agent.update_estimates(action, reward)
                 all_rewards[i, s] += reward
