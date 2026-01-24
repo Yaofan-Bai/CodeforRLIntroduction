@@ -1,87 +1,252 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+# ==================== 环境类（不变） ====================
 class NonStationaryBandit:
-    """非平稳10臂赌博机环境"""
     def __init__(self, k=10):
         self.k = k
-        # 初始时所有动作的真实价值相等（例如都设为0），或者随机初始化
         self.true_values = np.random.randn(k)
         self.optimal_action = np.argmax(self.true_values)
-
+    
     def step(self):
-        # 核心：模拟非平稳性。每一时刻给所有动作的真实价值加上一个微小的随机偏置
-        # 例如：均值为0，标准差为0.01的正态分布噪声
         self.true_values += np.random.normal(0, 0.01, self.k)
         self.optimal_action = np.argmax(self.true_values)
-
+    
     def get_reward(self, action):
-        # 奖励 = 当前真实的期望 + 噪声
         return self.true_values[action] + np.random.randn()
 
-class Agent:
-    """增加步长选择的 Agent"""
-    def __init__(self, k=10, epsilon=0.1, alpha=None):
+# ==================== 基类（定义接口） ====================
+class BanditAgent:
+    """所有Agent的基类，定义统一接口"""
+    def __init__(self, k=10, **kwargs):
         self.k = k
+    
+    def select_action(self):
+        raise NotImplementedError
+    
+    def update(self, action, reward):
+        raise NotImplementedError
+    
+    def reset(self):
+        raise NotImplementedError
+
+# ==================== ε-greedy Agent ====================
+class EpsilonGreedyAgent(BanditAgent):
+    def __init__(self, k=10, epsilon=0.1, alpha=0.1, initial_q=0.0):
+        super().__init__(k)
         self.epsilon = epsilon
-        self.alpha = alpha  # 如果 alpha 为 None，则使用 1/n (样本平均)
-        self.q_estimates = np.zeros(k)
+        self.alpha = alpha  # 固定步长（适合非平稳）
+        self.q_estimates = np.full(k, initial_q)
+    
+    def select_action(self):
+        if np.random.rand() < self.epsilon:
+            return np.random.randint(self.k)
+        return np.argmax(self.q_estimates)
+    
+    def update(self, action, reward):
+        self.q_estimates[action] += self.alpha * (reward - self.q_estimates[action])
+    
+    def reset(self):
+        self.q_estimates.fill(0.0)
+
+# ==================== UCB Agent ====================
+class UCBAgent(BanditAgent):
+    def __init__(self, k=10, c=2.0, alpha=0.1, initial_q=0.0):
+        super().__init__(k)
+        self.c = c  # 探索系数
+        self.alpha = alpha
+        self.q_estimates = np.full(k, initial_q)
         self.action_counts = np.zeros(k)
-
-    def select_action(self, method='epsilon_greedy'):
-        if method == 'epsilon_greedy':
-            if np.random.rand() < self.epsilon:
-                return np.random.randint(self.k)
-            return np.argmax(self.q_estimates)
-        elif method == 'ucb':
-            # UCB 策略
-            ucb_values = self.q_estimates + np.sqrt(2 * np.log(np.sum(self.action_counts) + 1) / (self.action_counts + 1e-5))
-            return np.argmax(ucb_values)
-        elif method == 'gradient':
-            # 梯度上升策略（假设偏好值初始化为0）
-            preferences = self.q_estimates
-            exp_preferences = np.exp(preferences - np.max(preferences)) # 数值稳定性, 减去最大值，防止溢出，但是保证逻辑相通
-            action_probs = exp_preferences / np.sum(exp_preferences)
-            return np.random.choice(self.k, p=action_probs)
-
-    def update_estimates(self, action, reward):
-        self.action_counts[action] += 1
+        self.total_steps = 0
+    
+    def select_action(self):
+        self.total_steps += 1
         
-        # 核心逻辑：判断是使用“样本平均”还是“固定步长”
-        if self.alpha is None:
-            step_size = 1.0 / self.action_counts[action] # 样本平均 (适合平稳)
+        # 确保每个动作至少被选择一次
+        if np.any(self.action_counts == 0):
+            return np.random.choice(np.where(self.action_counts == 0)[0])
+        
+        # UCB公式
+        ucb_values = self.q_estimates + self.c * np.sqrt(
+            np.log(self.total_steps) / self.action_counts
+        )
+        return np.argmax(ucb_values)
+    
+    def update(self, action, reward):
+        self.action_counts[action] += 1
+        self.q_estimates[action] += self.alpha * (reward - self.q_estimates[action])
+    
+    def reset(self):
+        self.q_estimates.fill(0.0)
+        self.action_counts.fill(0)
+        self.total_steps = 0
+
+# ==================== 梯度上升 Agent ====================
+class GradientBanditAgent(BanditAgent):
+    def __init__(self, k=10, alpha=0.1, baseline_type='reward_avg'):
+        """
+        baseline_type: 
+            'zero' - 基线=0
+            'q_mean' - 基线=Q估计均值
+            'reward_avg' - 历史奖励平均（默认）
+            'ema' - 指数移动平均
+        """
+        super().__init__(k)
+        self.alpha = alpha
+        self.baseline_type = baseline_type
+        
+        # 偏好和策略
+        self.preferences = np.zeros(k)
+        self.action_probs = np.ones(k) / k  # 初始均匀分布
+        
+        # 基线相关
+        if baseline_type == 'q_mean':
+            self.q_estimates = np.zeros(k)
+            self.q_counts = np.zeros(k)
+        elif baseline_type == 'reward_avg':
+            self.baseline = 0.0
+            self.step_count = 0
+        elif baseline_type == 'ema':
+            self.baseline = 0.0
+            self.beta = 0.1  # EMA衰减率
+        
+    def select_action(self):
+        # 计算softmax概率（数值稳定）
+        exp_pref = np.exp(self.preferences - np.max(self.preferences))
+        self.action_probs = exp_pref / np.sum(exp_pref)
+        return np.random.choice(self.k, p=self.action_probs)
+    
+    def _calculate_baseline(self, action, reward):
+        """根据类型计算基线"""
+        if self.baseline_type == 'zero':
+            return 0.0
+        
+        elif self.baseline_type == 'q_mean':
+            # 更新Q估计
+            self.q_counts[action] += 1
+            step_size = 1.0 / self.q_counts[action] if self.q_counts[action] > 0 else 1.0
+            self.q_estimates[action] += step_size * (reward - self.q_estimates[action])
+            return np.mean(self.q_estimates)
+        
+        elif self.baseline_type == 'reward_avg':
+            # 样本平均
+            self.step_count += 1
+            self.baseline += (reward - self.baseline) / self.step_count
+            return self.baseline
+        
+        elif self.baseline_type == 'ema':
+            # 指数移动平均
+            self.baseline = self.beta * reward + (1 - self.baseline) * self.baseline
+            return self.baseline
+        
         else:
-            step_size = self.alpha # 固定步长 (适合非平稳)
-            
-        self.q_estimates[action] += step_size * (reward - self.q_estimates[action])
+            return 0.0
+    
+    def update(self, action, reward):
+        # 1. 计算基线
+        baseline = self._calculate_baseline(action, reward)
+        
+        # 2. 更新偏好（梯度上升）
+        for a in range(self.k):
+            if a == action:
+                self.preferences[a] += self.alpha * (reward - baseline) * (1 - self.action_probs[a])
+            else:
+                self.preferences[a] -= self.alpha * (reward - baseline) * self.action_probs[a]
+    
+    def reset(self):
+        self.preferences.fill(0.0)
+        self.action_probs = np.ones(self.k) / self.k
+        if self.baseline_type == 'q_mean':
+            self.q_estimates.fill(0.0)
+            self.q_counts.fill(0)
+        elif self.baseline_type == 'reward_avg':
+            self.baseline = 0.0
+            self.step_count = 0
+        elif self.baseline_type == 'ema':
+            self.baseline = 0.0
 
-def run_non_stationary_experiment(runs=500, steps=1000):
-    # 对比：样本平均 vs 固定步长 (alpha=0.1)
-    # 两者都使用 epsilon=0.1 保证足够的探索
-    labels = ['Sample-Average (1/n)', 'Constant Step-size (α=0.1)']
-    all_rewards = np.zeros((2, steps))
-    for r in range(runs):
-        # 每次 run 初始化两个 agent 处理同一个环境
+# ==================== 实验运行函数 ====================
+def run_experiment(methods, runs=200, steps=1000):
+    """
+    运行对比实验
+    methods: 要对比的方法列表，如 ['epsilon_greedy', 'ucb', 'gradient']
+    """
+    results = {
+        'rewards': np.zeros((len(methods), steps)),
+        'optimal_actions': np.zeros((len(methods), steps))
+    }
+    
+    for run in range(runs):
         env = NonStationaryBandit()
-        agents = [Agent(alpha=None), Agent(alpha=0.1)]
-        for s in range(steps):
-            #env.step() # 环境发生变化！
+        
+        # 根据方法名创建Agent实例
+        agents = []
+        for method in methods:
+            if method == 'epsilon_greedy':
+                agents.append(EpsilonGreedyAgent(epsilon=0.1, alpha=0.1))
+            elif method == 'ucb':
+                agents.append(UCBAgent(c=2.0, alpha=0.1))
+            elif method == 'gradient':
+                agents.append(GradientBanditAgent(alpha=0.1, baseline_type='reward_avg'))
+            elif method == 'gradient_q_mean':
+                agents.append(GradientBanditAgent(alpha=0.1, baseline_type='q_mean'))
+        
+        for step in range(steps):
+            #env.step()  # 环境变化
+            
             for i, agent in enumerate(agents):
-                action = agent.select_action(method='gradient')
+                action = agent.select_action()
                 reward = env.get_reward(action)
-                agent.update_estimates(action, reward)
-                all_rewards[i, s] += reward
+                agent.update(action, reward)
                 
-    return all_rewards / runs
+                results['rewards'][i, step] += reward
+                if action == env.optimal_action:
+                    results['optimal_actions'][i, step] += 1
+    
+    # 平均
+    results['rewards'] /= runs
+    results['optimal_actions'] = results['optimal_actions'] / runs * 100  # 百分比
+    
+    return results
 
-# 运行并绘图
-avg_rewards = run_non_stationary_experiment()
-
-plt.figure(figsize=(12, 6))
-plt.plot(avg_rewards[0], label='Sample-Average', color='blue')
-plt.plot(avg_rewards[1], label='Constant Step-size (α=0.1)', color='red')
-plt.xlabel('Steps')
-plt.ylabel('Average Reward')
-plt.title('Non-stationary Bandit: Sample-Average vs Constant Step-size')
-plt.legend()
-plt.show()
+# ==================== 主程序 ====================
+if __name__ == "__main__":
+    # 运行实验
+    methods = ['epsilon_greedy', 'ucb', 'gradient', 'gradient_q_mean']
+    results = run_experiment(methods, runs=2000, steps=1000)
+    
+    # 绘图
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+    
+    colors = ['blue', 'green', 'red', 'orange']
+    labels = ['ε-Greedy (α=0.1)', 'UCB (c=2.0)', 'Gradient (reward avg)', 'Gradient (Q mean)']
+    
+    # 平均奖励图
+    ax = axes[0]
+    for i, method in enumerate(methods):
+        ax.plot(results['rewards'][i], label=labels[i], color=colors[i], alpha=0.8)
+    ax.set_xlabel('Steps')
+    ax.set_ylabel('Average Reward')
+    ax.set_title('Non-stationary Bandit: Average Reward')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 最优动作百分比图
+    ax = axes[1]
+    for i, method in enumerate(methods):
+        ax.plot(results['optimal_actions'][i], label=labels[i], color=colors[i], alpha=0.8)
+    ax.set_xlabel('Steps')
+    ax.set_ylabel('% Optimal Action')
+    ax.set_title('Non-stationary Bandit: % Optimal Action')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 打印最终性能
+    print("Final Performance (last 100 steps average):")
+    for i, label in enumerate(labels):
+        avg_reward = np.mean(results['rewards'][i, -100:])
+        avg_optimal = np.mean(results['optimal_actions'][i, -100:])
+        print(f"{label:20s} - Reward: {avg_reward:.4f}, Optimal %: {avg_optimal:.2f}%")
