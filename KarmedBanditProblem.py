@@ -40,7 +40,7 @@ class Agent:
         elif method == 'gradient':
             # 梯度上升策略（假设偏好值初始化为0）
             preferences = self.q_estimates
-            exp_preferences = np.exp(preferences - np.max(preferences))
+            exp_preferences = np.exp(preferences - np.max(preferences)) # 数值稳定性, 减去最大值，防止溢出，但是保证逻辑相通
             action_probs = exp_preferences / np.sum(exp_preferences)
             return np.random.choice(self.k, p=action_probs)
 
