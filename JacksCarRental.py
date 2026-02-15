@@ -1,5 +1,5 @@
 import numpy as np
-import math
+import pandas as pd
 import matplotlib.pyplot as plt
 class JacksCarRentalEnvironment:
     def __init__(self, MaxCarsA=20, MaxCarsB=20, MaxMove=5, RentReward=10, MoveCost=2,
@@ -17,12 +17,21 @@ class JacksCarRentalEnvironment:
         self.Policy = np.zeros((MaxCarsA + 1, MaxCarsB + 1), dtype=int)
         self.Actions = np.arange(-MaxMove, MaxMove + 1)
         self.MAX_DEMAND = MAX_DEMAND
+        # 加载预计算的泊松分布表
+        self.poisson_table = pd.read_csv('poisson_table.csv', index_col=0)
+        self.poisson_tail_table = pd.read_csv('poisson_tail_table.csv', index_col=0)
     def Posson(self, n, lam):
-        """计算 Possion 分布概率"""
-        return (lam ** n) * np.exp(-lam) / math.factorial(n) #需要求阶乘，使用math库的factorial函数，后续使用查表优化性能
+        """从表中获取 Poisson 分布概率"""
+        col_name = f'lambda={lam}'
+        if col_name in self.poisson_table.columns and n < len(self.poisson_table):
+            return self.poisson_table.loc[n, col_name]
+        return 0.0
     def PossonTail(self, n, lam):
-        """计算 Possion 分布的尾概率 P(X >= n)"""
-        return 1 - sum(self.Posson(k, lam) for k in range(n))
+        """从表中获取 Poisson 分布的尾概率 P(X >= n)"""
+        col_name = f'lambda={lam}'
+        if col_name in self.poisson_tail_table.columns and n < len(self.poisson_tail_table):
+            return self.poisson_tail_table.loc[n, col_name]
+        return 0.0
     def TransitionProb(self, State, action):
         """计算从当前状态执行动作到达下一个状态的转移概率"""
         probs = {}  # key: (s_prime, reward), value: probability
